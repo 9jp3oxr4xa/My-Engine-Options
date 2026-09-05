@@ -1,0 +1,24 @@
+﻿instruments:
+  # All values below are VERIFIED. No placeholders, no synthetic test data.
+  NIFTY:
+    security_id: "13"            # verified Dhan/NSE index id
+    exchange_segment: "NSE_FNO"
+    lot_size: 65
+    strike_step: 50              # verified from live NSE chain
+    tick_size: 0.05
+    fyers_symbol: "NSE:NIFTY50-INDEX"   # verified FYERS spot symbol
+
+  # SENSEX metadata is verified and kept here so activation is a one-line
+  # config change once its liquidity data becomes available.
+  # NOTE: SENSEX is intentionally NOT listed in config.yaml engine.underlyings.
+  #       FYERS supplies chain/expiry/spot/OI/volume/IV for BSE, but returns
+  #       bid=ask=0 and no bid_qty/ask_qty, so the LIQUIDITY and SPREAD risk
+  #       gates cannot be satisfied. Activating it would create a dead signal
+  #       path. See fyers_chain_adapter.py "FIELD AVAILABILITY".
+  SENSEX:
+    security_id: "51"            # verified BSE index id (NOT an option id)
+    exchange_segment: "BSE_FNO"
+    lot_size: 20                 # verified from instrument master
+    strike_step: 100             # DERIVED from live chain (option tick is 5)
+    tick_size: 0.05
+    fyers_symbol: "BSE:SENSEX-INDEX"    # verified FYERS spot symbol

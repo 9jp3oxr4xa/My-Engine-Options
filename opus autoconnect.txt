@@ -1,0 +1,601 @@
+# ================================================================
+# NUCLEAR OPUS / GOROUTER WATCHDOG
+#
+# Purpose:
+#   Continuously verify that:
+#       HTTPS connectivity
+#       + GoRouter authentication
+#       + requested model availability
+#       + /v1/chat/completions
+#       + valid OpenAI-compatible response
+#   are all working.
+#
+# Behavior:
+#   HEALTHY
+#       -> check every 10 sec
+#
+#   FAILURE
+#       -> immediately enter recovery
+#       -> retry aggressively
+#       -> exponential backoff, capped
+#       -> honor HTTP Retry-After when supplied
+#       -> NEVER permanently stop because of 401/403/etc.
+#
+#   RECOVERY
+#       -> once valid Opus response returns
+#       -> resume normal monitoring
+#
+# Safety:
+#   - Never logs API key
+#   - Never resubmits your real task
+#   - Only submits harmless watchdog "ping" requests
+#   - Re-reads GOROUTER_API_KEY every probe
+#   - Handles Ctrl+C cleanly
+#   - Persistent logfile
+# ================================================================
+
+$ErrorActionPreference = "Stop"
+
+# ---------------- CONFIG ----------------
+
+$BaseUrl            = "https://gorouter.app"
+$ChatUrl            = "$BaseUrl/v1/chat/completions"
+
+$Model              = "claude-opus-5"
+
+$HealthyIntervalSec = 10
+$InitialRetrySec    = 1
+$MaxRetrySec        = 30
+$RequestTimeoutSec  = 10
+
+$LogFile            = Join-Path $PWD "opus_watchdog.log"
+
+# ---------------- STATE -----------------
+
+$script:State        = "STARTING"
+$script:FailureCount = 0
+$script:TotalChecks  = 0
+$script:Failures     = 0
+$script:Recoveries   = 0
+$script:Running      = $true
+
+# ---------------- LOGGING ----------------
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    $line = "[$timestamp] $Message"
+
+    Write-Host $line
+
+    try {
+        Add-Content `
+            -LiteralPath $LogFile `
+            -Value $line `
+            -Encoding UTF8
+    }
+    catch {
+        Write-Host "[$timestamp] ⚠️ LOG WRITE FAILED"
+    }
+}
+
+# ---------------- API KEY -----------------
+
+function Get-ApiHeaders {
+
+    $key = [Environment]::GetEnvironmentVariable(
+        "GOROUTER_API_KEY",
+        "Process"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($key)) {
+
+        $key = [Environment]::GetEnvironmentVariable(
+            "GOROUTER_API_KEY",
+            "User"
+        )
+    }
+
+    if ([string]::IsNullOrWhiteSpace($key)) {
+
+        $key = [Environment]::GetEnvironmentVariable(
+            "GOROUTER_API_KEY",
+            "Machine"
+        )
+    }
+
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        return $null
+    }
+
+    return @{
+        "Authorization" = "Bearer $key"
+        "Content-Type"  = "application/json"
+        "Accept"        = "application/json"
+        "User-Agent"    = "Opus-Watchdog/1.0"
+        "Cache-Control" = "no-cache"
+    }
+}
+
+# ---------------- BODY --------------------
+
+function New-PingBody {
+
+    # Dynamic content prevents accidental intermediary caching
+    $nonce = [guid]::NewGuid().ToString("N")
+    $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+    @{
+        model = $Model
+
+        messages = @(
+            @{
+                role    = "user"
+                content = "watchdog-ping-$stamp-$nonce"
+            }
+        )
+
+        temperature = 0
+        max_tokens  = 1
+    } | ConvertTo-Json -Depth 10 -Compress
+}
+
+# ---------------- RESPONSE VALIDATION ----------------
+
+function Test-ValidOpusResponse {
+
+    param(
+        [Parameter(Mandatory)]
+        $Response
+    )
+
+    if ($null -eq $Response) {
+        return $false
+    }
+
+    if ($Response.StatusCode -ne 200) {
+        return $false
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Response.Content)) {
+        return $false
+    }
+
+    try {
+
+        $json = $Response.Content | ConvertFrom-Json
+
+        if ($null -eq $json.choices) {
+            return $false
+        }
+
+        if ($json.choices.Count -lt 1) {
+            return $false
+        }
+
+        if ($null -eq $json.choices[0].message) {
+            return $false
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+# ---------------- HTTP STATUS EXTRACTION ----------------
+
+function Get-HttpStatusCode {
+
+    param(
+        [Parameter(Mandatory)]
+        $ErrorRecord
+    )
+
+    try {
+        $response = $ErrorRecord.Exception.Response
+
+        if ($null -ne $response) {
+
+            try {
+                return [int]$response.StatusCode.value__
+            }
+            catch {}
+
+            try {
+                return [int]$response.StatusCode
+            }
+            catch {}
+        }
+    }
+    catch {}
+
+    return $null
+}
+
+# ---------------- RETRY-AFTER ----------------
+
+function Get-RetryAfterSeconds {
+
+    param(
+        [Parameter(Mandatory)]
+        $ErrorRecord
+    )
+
+    try {
+
+        $response = $ErrorRecord.Exception.Response
+
+        if ($null -eq $response) {
+            return $null
+        }
+
+        $value = $response.Headers["Retry-After"]
+
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return $null
+        }
+
+        $seconds = 0
+
+        if (
+            [int]::TryParse(
+                $value.ToString(),
+                [ref]$seconds
+            )
+        ) {
+
+            if ($seconds -lt 0) {
+                return 0
+            }
+
+            return $seconds
+        }
+    }
+    catch {}
+
+    return $null
+}
+
+# ---------------- ONE REAL HEALTH CHECK ----------------
+
+function Invoke-HealthCheck {
+
+    $script:TotalChecks++
+
+    $headers = Get-ApiHeaders
+
+    if ($null -eq $headers) {
+
+        return [pscustomobject]@{
+            Healthy    = $false
+            Category   = "NO_API_KEY"
+            Code       = $null
+            Detail     = "GOROUTER_API_KEY missing or empty"
+            RetryAfter = $null
+        }
+    }
+
+    $body = New-PingBody
+
+    try {
+
+        $response = Invoke-WebRequest `
+            -Uri $ChatUrl `
+            -Method POST `
+            -Headers $headers `
+            -Body $body `
+            -TimeoutSec $RequestTimeoutSec `
+            -UseBasicParsing
+
+        if (Test-ValidOpusResponse $response) {
+
+            return [pscustomobject]@{
+                Healthy    = $true
+                Category   = "ONLINE"
+                Code       = 200
+                Detail     = "HTTP 200 + valid chat completion"
+                RetryAfter = $null
+            }
+        }
+
+        return [pscustomobject]@{
+            Healthy    = $false
+            Category   = "INVALID_RESPONSE"
+            Code       = 200
+            Detail     = "HTTP 200 but response failed schema validation"
+            RetryAfter = $null
+        }
+    }
+
+    catch {
+
+        $code = Get-HttpStatusCode $_
+        $retryAfter = Get-RetryAfterSeconds $_
+
+        switch ($code) {
+
+            400 {
+                $category = "BAD_REQUEST"
+            }
+
+            401 {
+                $category = "UNAUTHORIZED"
+            }
+
+            403 {
+                $category = "FORBIDDEN"
+            }
+
+            404 {
+                $category = "NOT_FOUND"
+            }
+
+            408 {
+                $category = "REQUEST_TIMEOUT"
+            }
+
+            409 {
+                $category = "CONFLICT"
+            }
+
+            429 {
+                $category = "RATE_LIMITED"
+            }
+
+            500 {
+                $category = "SERVER_ERROR"
+            }
+
+            502 {
+                $category = "BAD_GATEWAY"
+            }
+
+            503 {
+                $category = "SERVICE_UNAVAILABLE"
+            }
+
+            504 {
+                $category = "GATEWAY_TIMEOUT"
+            }
+
+            default {
+                $category = "NETWORK_OR_UNKNOWN"
+            }
+        }
+
+        $detail = if ($code) {
+            "HTTP $code"
+        }
+        else {
+            $_.Exception.Message
+        }
+
+        return [pscustomobject]@{
+            Healthy    = $false
+            Category   = $category
+            Code       = $code
+            Detail     = $detail
+            RetryAfter = $retryAfter
+        }
+    }
+}
+
+# ---------------- FAILURE MESSAGE ----------------
+
+function Write-Failure {
+
+    param(
+        [Parameter(Mandatory)]
+        $Result
+    )
+
+    $script:Failures++
+
+    $detail = "🚨 OPUS FAILURE — $($Result.Category)"
+
+    if ($Result.Code) {
+        $detail += " / HTTP $($Result.Code)"
+    }
+
+    $detail += " / $($Result.Detail)"
+
+    Write-Log $detail
+}
+
+# ---------------- BACKOFF ----------------
+
+function Get-BackoffSeconds {
+
+    param(
+        [Parameter(Mandatory)]
+        [int]$FailureNumber
+    )
+
+    if ($FailureNumber -le 1) {
+        return $InitialRetrySec
+    }
+
+    $value = [math]::Pow(2, ($FailureNumber - 1))
+
+    if ($value -gt $MaxRetrySec) {
+        return $MaxRetrySec
+    }
+
+    return [int]$value
+}
+
+# ---------------- CTRL+C ----------------
+
+[console]::TreatControlCAsInput = $false
+
+try {
+
+    Write-Log "============================================================"
+    Write-Log "🛡️ OPUS / GOROUTER WATCHDOG STARTED"
+    Write-Log "Endpoint : $ChatUrl"
+    Write-Log "Model    : $Model"
+    Write-Log "Healthy  : every ${HealthyIntervalSec}s"
+    Write-Log "Timeout  : ${RequestTimeoutSec}s"
+    Write-Log "Recovery : ${InitialRetrySec}s → ${MaxRetrySec}s"
+    Write-Log "Log file : $LogFile"
+    Write-Log "============================================================"
+
+    # ============================================================
+    # MAIN WATCHDOG
+    # ============================================================
+
+    while ($script:Running) {
+
+        $result = Invoke-HealthCheck
+
+        # --------------------------------------------------------
+        # HEALTHY
+        # --------------------------------------------------------
+
+        if ($result.Healthy) {
+
+            if ($script:State -eq "RECOVERING") {
+
+                $script:Recoveries++
+
+                Write-Log "🟢 OPUS RECOVERED — HTTP 200 + VALID RESPONSE"
+                Write-Log "🟢 AUTO-RECOVERY COMPLETE"
+                Write-Log "🟢 NORMAL MONITORING RESUMED"
+
+            }
+            else {
+
+                Write-Log "✅ OPUS HEALTHY"
+            }
+
+            $script:State = "HEALTHY"
+            $script:FailureCount = 0
+
+            Start-Sleep -Seconds $HealthyIntervalSec
+
+            continue
+        }
+
+        # --------------------------------------------------------
+        # FIRST FAILURE
+        # --------------------------------------------------------
+
+        if ($script:State -eq "HEALTHY" -or
+            $script:State -eq "STARTING") {
+
+            Write-Failure $result
+
+            Write-Log "⚡ IMMEDIATE AUTO-RECOVERY ACTIVATED"
+
+            $script:State = "RECOVERING"
+            $script:FailureCount = 0
+        }
+
+        # --------------------------------------------------------
+        # RECOVERY LOOP
+        # --------------------------------------------------------
+
+        while ($script:Running) {
+
+            $script:FailureCount++
+
+            # Re-check immediately on first recovery iteration
+            $retrySeconds = Get-BackoffSeconds $script:FailureCount
+
+            if ($script:FailureCount -gt 1) {
+
+                Write-Log "🔁 RECOVERY RETRY #$($script:FailureCount) IN ${retrySeconds}s"
+
+                Start-Sleep -Seconds $retrySeconds
+            }
+
+            $recovery = Invoke-HealthCheck
+
+            # ----------------------------------------------------
+            # RECOVERED
+            # ----------------------------------------------------
+
+            if ($recovery.Healthy) {
+
+                Write-Log "✅ RECOVERY SUCCESS — HTTP 200 + VALID RESPONSE"
+
+                $script:Recoveries++
+
+                $script:State = "HEALTHY"
+                $script:FailureCount = 0
+
+                Write-Log "🟢 WATCHDOG BACK IN NORMAL MODE"
+
+                break
+            }
+
+            # ----------------------------------------------------
+            # STILL DOWN
+            # ----------------------------------------------------
+
+            switch ($recovery.Category) {
+
+                "RATE_LIMITED" {
+
+                    if ($null -ne $recovery.RetryAfter) {
+
+                        $wait = [math]::Max(
+                            [int]$recovery.RetryAfter,
+                            $InitialRetrySec
+                        )
+
+                        $wait = [math]::Min(
+                            $wait,
+                            $MaxRetrySec
+                        )
+
+                        Write-Log "⚠️ HTTP 429 — Retry-After=$wait s"
+
+                    }
+                    else {
+
+                        $wait = Get-BackoffSeconds $script:FailureCount
+
+                        Write-Log "⚠️ HTTP 429 — no Retry-After; backoff=$wait s"
+                    }
+
+                    # Override next loop delay
+                    $script:FailureCount = [math]::Max(
+                        $script:FailureCount,
+                        1
+                    )
+
+                    Start-Sleep -Seconds $wait
+                }
+
+                default {
+
+                    $codeText = if ($recovery.Code) {
+                        "HTTP $($recovery.Code)"
+                    }
+                    else {
+                        $recovery.Category
+                    }
+
+                    Write-Log "❌ RECOVERY FAILED — $codeText — $($recovery.Detail)"
+                }
+            }
+        }
+    }
+}
+finally {
+
+    Write-Log "============================================================"
+    Write-Log "🛑 OPUS WATCHDOG STOPPED"
+    Write-Log "Checks    : $($script:TotalChecks)"
+    Write-Log "Failures  : $($script:Failures)"
+    Write-Log "Recoveries: $($script:Recoveries)"
+    Write-Log "============================================================"
+}

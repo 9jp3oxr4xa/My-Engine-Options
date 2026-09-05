@@ -1,0 +1,93 @@
+{
+  "chains": [
+    {
+      "underlying": "NIFTY",
+      "expiry": "2026-01-08",
+      "spot": 26000,
+      "ts": "2026-01-01T09:15:00+05:30",
+      "strikes": [
+        {
+          "strike": 25950,
+          "ce": {
+            "ltp": 100,
+            "bid": 99.95,
+            "ask": 100.05,
+            "oi": 1000,
+            "oi_prev": 1000,
+            "volume": 100,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1001"
+          },
+          "pe": {
+            "ltp": 80,
+            "bid": 79.95,
+            "ask": 80.05,
+            "oi": 1000,
+            "oi_prev": 1000,
+            "volume": 100,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1002"
+          }
+        },
+        {
+          "strike": 26000,
+          "ce": {
+            "ltp": 150,
+            "bid": 149.95,
+            "ask": 150.05,
+            "oi": 2000,
+            "oi_prev": 2000,
+            "volume": 200,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1003"
+          },
+          "pe": {
+            "ltp": 140,
+            "bid": 139.95,
+            "ask": 140.05,
+            "oi": 2000,
+            "oi_prev": 2000,
+            "volume": 200,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1004"
+          }
+        },
+        {
+          "strike": 26050,
+          "ce": {
+            "ltp": 110,
+            "bid": 109.95,
+            "ask": 110.05,
+            "oi": 1000,
+            "oi_prev": 1000,
+            "volume": 100,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1005"
+          },
+          "pe": {
+            "ltp": 90,
+            "bid": 89.95,
+            "ask": 90.05,
+            "oi": 1000,
+            "oi_prev": 1000,
+            "volume": 100,
+            "iv": 15,
+            "bid_qty": 10,
+            "ask_qty": 10,
+            "security_id": "1006"
+          }
+        }
+      ]
+    }
+  ]
+}

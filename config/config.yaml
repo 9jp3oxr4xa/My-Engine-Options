@@ -1,0 +1,51 @@
+﻿engine:
+  underlyings:
+    - NIFTY
+  evaluation_interval_s: 5
+  timezone: Asia/Kolkata
+  holidays: []
+
+feeds:
+  ws_reconnect_max_s: 30
+  chain_poll_interval_s: 30
+  stale_tick_s: 10
+  stale_chain_s: 90
+
+signals:
+  confidence_threshold: 70
+  min_categories_passed: 3
+  cooldown_minutes_per_underlying: 10
+  max_signals_per_day_per_underlying: 5
+  min_reward_risk: 1.5
+
+risk:
+  max_spread_pct_of_premium: 5
+  min_option_volume_5m: 100
+  min_top_depth_lots: 2
+  news_blackout: []
+
+structure:
+  swing_left_bars: 2
+  swing_right_bars: 2
+  sweep_max_close_back_bars: 3
+
+regime:
+  adx_period: 14
+  atr_period: 14
+  compression_bb_pct_rank: 20
+
+options:
+  atm_band_strikes: 3
+  oi_delta_lookback_snapshots: 10
+  pcr_bands:
+    bearish_below: 0.8
+    bullish_above: 1.2
+
+telegram:
+  chat_id_env: TG_CHAT_ID
+  send_rejections_digest: false
+
+logging:
+  level: INFO
+  json: true
+  dir: logs/
