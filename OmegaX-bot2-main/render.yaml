@@ -1,0 +1,64 @@
+services:
+  # Single Ultra-Powerful Web Service
+  - type: web
+    name: quantum-trading-nuclear
+    runtime: python
+    region: oregon
+    plan: free
+    
+    buildCommand: |
+      echo "☢️ NUCLEAR BUILD SEQUENCE INITIATED..."
+      echo "🐍 Python Version: $(python --version)"
+      
+      # Optimize for free tier memory
+      export PIP_NO_CACHE_DIR=1
+      export PYTHONOPTIMIZE=2
+      
+      # Install dependencies
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      
+      # Create required directories
+      mkdir -p data logs cache tmp
+      
+      # Pre-compile for speed
+      python -m compileall -b .
+      
+      # Create keep-alive script
+      cat > keep_alive.py << 'EOF'
+      import asyncio, aiohttp, os
+      async def ping():
+          url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:10000')
+          async with aiohttp.ClientSession() as s:
+              try: await s.get(f"{url}/health")
+              except: pass
+      async def keeper():
+          while True:
+              await ping()
+              await asyncio.sleep(600)
+      EOF
+      
+      echo "✅ NUCLEAR BUILD COMPLETE!"
+      
+    startCommand: python nuclear_launcher.py
+    
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: TESTNET
+        value: true
+      - key: INITIAL_BALANCE
+        value: 1000
+      - key: MAX_POSITIONS
+        value: 8
+      - key: WEB_CONCURRENCY
+        value: 1
+      - key: PYTHONUNBUFFERED
+        value: 1
+      - key: PYTHONOPTIMIZE
+        value: 2
+      
+    healthCheckPath: /health
+    autoDeploy: true
